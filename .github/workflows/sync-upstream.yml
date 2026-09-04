@@ -1,0 +1,126 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: Rahularya01/pi-antigravity
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: main
+
+jobs:
+  validate:
+    name: Validate upstream merge
+    runs-on: ubuntu-latest
+    outputs:
+      base_sha: ${{ steps.candidate.outputs.base_sha }}
+      changed: ${{ steps.candidate.outputs.changed }}
+      upstream_sha: ${{ steps.candidate.outputs.upstream_sha }}
+    steps:
+      # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build merge candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+
+          base_sha="$(git rev-parse HEAD)"
+          upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
+
+          if git merge-base --is-ancestor "${upstream_sha}" HEAD; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            echo "Upstream is already synchronized." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          git merge --no-edit "${upstream_sha}"
+          echo "changed=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Bun
+        if: steps.candidate.outputs.changed == 'true'
+        shell: bash
+        run: |
+          bun_version="$(tr -d '[:space:]' < .bun-version)"
+          curl -fsSL https://bun.sh/install | bash -s "bun-v${bun_version}"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        if: steps.candidate.outputs.changed == 'true'
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Verify fork invariants
+        if: steps.candidate.outputs.changed == 'true'
+        run: bun scripts/check-fork-invariants.ts
+
+      - name: Run upstream checks
+        if: steps.candidate.outputs.changed == 'true'
+        run: bun run check
+
+  sync:
+    name: Push validated merge
+    needs: validate
+    if: needs.validate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: main
+
+      - name: Merge and push validated upstream commit
+        shell: bash
+        env:
+          VALIDATED_BASE_SHA: ${{ needs.validate.outputs.base_sha }}
+          VALIDATED_UPSTREAM_SHA: ${{ needs.validate.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$(git rev-parse HEAD)" != "${VALIDATED_BASE_SHA}" ]]; then
+            echo "main changed after validation; refusing to push a stale merge" >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+
+          current_upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          if [[ "${current_upstream_sha}" != "${VALIDATED_UPSTREAM_SHA}" ]]; then
+            echo "upstream changed after validation; refusing to push an unvalidated commit" >&2
+            exit 1
+          fi
+
+          git merge --no-edit "${VALIDATED_UPSTREAM_SHA}"
+
+          if grep -R -nE --include='*.ts' "name:[[:space:]]*['\"]generate_image['\"]" src; then
+            echo "generate_image registration reappeared after merge" >&2
+            exit 1
+          fi
+
+          git push origin "HEAD:${TARGET_BRANCH}"
+          echo "Merged upstream ${VALIDATED_UPSTREAM_SHA} into ${TARGET_BRANCH}." >> "${GITHUB_STEP_SUMMARY}"
