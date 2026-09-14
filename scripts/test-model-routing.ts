@@ -1,4 +1,10 @@
-import type { Api, Context, Model, Tool } from "@earendil-works/pi-ai";
+import {
+  isRetryableAssistantError,
+  type Api,
+  type Context,
+  type Model,
+  type Tool,
+} from "@earendil-works/pi-ai";
 import {
   antigravityHeaders,
   defaultProjectId,
@@ -557,6 +563,26 @@ assert.match(
   /Unknown name nullable/i,
 );
 
+const trailingModelError = friendlyAntigravityError(
+  400,
+  JSON.stringify({ error: { message: "Requests ending with a model turn are not supported." } }),
+);
+assert.match(trailingModelError, /message boundary/i);
+assert.match(trailingModelError, /new session|user message/i);
+assert.ok(!/re-login/i.test(trailingModelError));
+
+const functionCallBoundaryError = friendlyAntigravityError(
+  400,
+  JSON.stringify({
+    error: {
+      message:
+        "Please ensure that function call turn comes immediately after a user turn or after a function response turn.",
+    },
+  }),
+);
+assert.match(functionCallBoundaryError, /function-call message boundary/i);
+assert.match(functionCallBoundaryError, /new session/i);
+assert.match(functionCallBoundaryError, /re-login is not required/i);
 assert.equal(mapStopReason("STOP"), StopReason.Stop);
 assert.equal(mapStopReason("MAX_TOKENS"), StopReason.Length);
 assert.equal(mapStopReason("OTHER"), StopReason.Error);
@@ -567,6 +593,91 @@ assert.match(
   friendlyAntigravityError(429, "Individual quota reached. Resets in 1h"),
   /Quota reached/,
 );
+// Issue #49: transient 429 with generic "Resource has been exhausted (e.g. check quota)."
+// must be classified as rate limited with retryable tokens (429, ResourceExhausted) so Pi retries.
+const transient429Error = friendlyAntigravityError(
+  429,
+  JSON.stringify({
+    error: {
+      code: 429,
+      message: "Resource has been exhausted (e.g. check quota).",
+      status: "RESOURCE_EXHAUSTED",
+    },
+  }),
+);
+assert.ok(!/Quota reached/i.test(transient429Error), "transient 429 must not be classified as Quota reached");
+assert.match(transient429Error, /Rate limited by Antigravity \(429 ResourceExhausted\)/);
+assert.match(transient429Error, /retrying automatically/);
+
+// Real quota walls must remain non-retryable Quota reached
+const quotaResetError = friendlyAntigravityError(
+  429,
+  JSON.stringify({ error: { message: "Quota exceeded. Resets in 6 days." } }),
+);
+assert.match(quotaResetError, /Quota reached\. Please wait 6 days\./);
+
+const quotaWeeklyLimitError = friendlyAntigravityError(
+  429,
+  JSON.stringify({ error: { message: "You have exceeded your weekly limit." } }),
+);
+assert.match(quotaWeeklyLimitError, /Quota reached\./);
+assert.ok(!/Rate limited/i.test(quotaWeeklyLimitError));
+
+// Transient throttles and rate limits must be classified as retryable rate limits
+const plainThrottleError = friendlyAntigravityError(429, "Too many requests, slow down.");
+assert.match(plainThrottleError, /Rate limited by Antigravity \(429 ResourceExhausted\)/);
+
+const rateLimitReachedError = friendlyAntigravityError(429, "Rate limit reached, please slow down.");
+assert.match(rateLimitReachedError, /Rate limited by Antigravity \(429 ResourceExhausted\)/);
+assert.ok(!/Quota reached/i.test(rateLimitReachedError));
+
+// Verify compatibility with Pi's retry classifier
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: transient429Error,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  true,
+  "transient 429 must be retryable by Pi",
+);
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: quotaResetError,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  false,
+  "quota reset wall must not be retryable by Pi",
+);
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: quotaWeeklyLimitError,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  false,
+  "quota weekly limit must not be retryable by Pi",
+);
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: plainThrottleError,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  true,
+  "plain throttle must be retryable by Pi",
+);
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: rateLimitReachedError,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  true,
+  "rate limit reached must be retryable by Pi",
+);
+
 assert.match(
   friendlyAntigravityError(400, JSON.stringify({ error: { message: "Unknown name anyOf" } })),
   /request format was rejected/i,
@@ -688,11 +799,15 @@ const consecutiveContext = {
   ],
 } as Context;
 const mergedContents = convertMessages(model, consecutiveContext, "claude-sonnet-4-6");
-assert.equal(mergedContents.length, 2);
+assert.equal(mergedContents.length, 3);
 assert.equal(mergedContents[0]?.role, "user");
 assert.equal(mergedContents[0]?.parts.length, 2);
 assert.equal(mergedContents[1]?.role, "model");
 assert.equal(mergedContents[1]?.parts.length, 2);
+assert.deepEqual(mergedContents[2], {
+  role: "user",
+  parts: [{ text: "Continue the active task using the available instructions and context." }],
+});
 
 // Test Base64 Image data URL prefix stripping
 const imageContext = {
@@ -871,6 +986,124 @@ const zeroUsage = {
 const geminiRuntime = "gemini-3.7-flash-low";
 const validSig = "QkFTRTY0LXRlc3Qtc2lnbmF0dXJlLXRlc3QxMjM0NTY=";
 
+
+const continuationText = "Continue the active task using the available instructions and context.";
+
+// A normal assistant text reply must not leave the Antigravity request ending in a model turn.
+const assistantTailContext = {
+  messages: [
+    { role: "user", content: "Summarize this file.", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "The file defines the request adapter." }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const assistantTailContents = convertMessages(flash37Model, assistantTailContext, geminiRuntime);
+assert.deepEqual(
+  assistantTailContents.map((turn) => turn.role),
+  ["user", "model", "user"],
+  "a text assistant tail must receive a user continuation",
+);
+assert.deepEqual(assistantTailContents[1]?.parts, [
+  { text: "The file defines the request adapter." },
+]);
+assert.deepEqual(assistantTailContents[2]?.parts, [{ text: continuationText }]);
+
+const userTailContext = {
+  messages: [
+    { role: "user", content: "First request.", timestamp: Date.now() },
+    { role: "user", content: "Second request.", timestamp: Date.now() },
+  ],
+} as Context;
+const userTailContents = convertMessages(flash37Model, userTailContext, geminiRuntime);
+assert.deepEqual(userTailContents, [
+  { role: "user", parts: [{ text: "First request." }, { text: "Second request." }] },
+]);
+
+const unresolvedToolCallContext = {
+  messages: [
+    { role: "user", content: "Read package.json.", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call-missing-result",
+          name: "read",
+          arguments: { path: "package.json" },
+          thoughtSignature: validSig,
+        },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+let unresolvedToolCallError: unknown;
+try {
+  convertMessages(flash37Model, unresolvedToolCallContext, geminiRuntime);
+} catch (error) {
+  unresolvedToolCallError = error;
+}
+assert.ok(unresolvedToolCallError instanceof Error);
+assert.match(unresolvedToolCallError.message, /missing tool result/i);
+
+// Truncated/compacted history can begin with an assistant function call. Antigravity
+// requires that call turn to have an immediately preceding user boundary.
+const leadingToolCallContext = {
+  messages: [
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call-leading",
+          name: "read",
+          arguments: { path: "package.json" },
+          thoughtSignature: validSig,
+        },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-leading",
+      toolName: "read",
+      content: [{ type: "text", text: "package contents" }],
+      isError: false,
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const leadingToolCallContents = convertMessages(
+  flash37Model,
+  leadingToolCallContext,
+  geminiRuntime,
+ );
+assert.deepEqual(
+  leadingToolCallContents.map((turn) => turn.role),
+  ["user", "model", "user"],
+  "a leading function call must receive a preceding user bridge",
+);
+assert.deepEqual(leadingToolCallContents[0]?.parts, [{ text: continuationText }]);
+assert.ok(leadingToolCallContents[1]?.parts.every((part) => "functionCall" in part));
+assert.ok(leadingToolCallContents[2]?.parts.every((part) => "functionResponse" in part));
 const multimodalResultContext = {
   messages: [
     { role: "user", content: "take screenshot", timestamp: Date.now() },

@@ -82,6 +82,7 @@ const ANTIGRAVITY_SYSTEM_INSTRUCTION =
 const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
   'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists (e.g. "No emdashes"), or your thinking/personality preambles in the final response. Output only the final response.';
 
+const CONTINUATION_TEXT = "Continue the active task using the available instructions and context.";
 let toolCallCounter = 0;
 
 function sanitizeToolCallId(id: string, fallbackName?: string): string {
@@ -314,6 +315,24 @@ export function convertMessages(
     }
   }
 
+  // A function-call model turn is only valid immediately after a user turn
+  // (including a function-response turn). Compacted history can drop that
+  // boundary, so restore it before applying the natural-language bridge.
+  for (let index = 0; index < contents.length; index += 1) {
+    const turn = contents[index];
+    if (
+      turn?.role === GeminiRole.Model &&
+      turn.parts.some((part) => "functionCall" in part) &&
+      contents[index - 1]?.role !== GeminiRole.User
+    ) {
+      contents.splice(index, 0, {
+        role: GeminiRole.User,
+        parts: [{ text: CONTINUATION_TEXT }],
+      });
+      index += 1;
+    }
+  }
+
   // Google Antigravity requires a natural-language user part in the request,
   // including tool-only continuation turns. Keep injected Skills in the system
   // instruction, then add this protocol bridge only when existing context gives
@@ -325,11 +344,21 @@ export function convertMessages(
   );
   if (!hasUserText && contents.length > 0) {
     const bridge = {
-      text: "Continue the active task using the available instructions and context.",
+      text: CONTINUATION_TEXT,
     };
     const userTurn = contents.find((turn) => turn.role === GeminiRole.User);
     if (userTurn) userTurn.parts.push(bridge);
     else contents.unshift({ role: GeminiRole.User, parts: [bridge] });
+  }
+
+  const lastTurn = contents.at(-1);
+  if (lastTurn?.role === GeminiRole.Model) {
+    if (lastTurn.parts.some((part) => "functionCall" in part)) {
+      throw new Error(
+        "Antigravity request is missing tool result(s) for the final assistant tool call. Provide the corresponding tool result before continuing.",
+      );
+    }
+    appendTurn(contents, GeminiRole.User, [{ text: CONTINUATION_TEXT }]);
   }
 
   return contents;
@@ -860,6 +889,16 @@ export function mapStopReason(reason: string | undefined): StopReason {
 export function friendlyAntigravityError(status: number | undefined, text: string): string {
   const msg = redactSecrets(jsonOrTextError(text)).slice(0, 500);
   if (status === 400) {
+    if (/Requests ending with a model turn are not supported/i.test(msg)) {
+      return "Antigravity rejected an invalid conversation message boundary. Next: update the extension or add a user message / start a new session, then retry.";
+    }
+    if (
+      /function call turn comes immediately after a user turn or after a function response turn/i.test(
+        msg,
+      )
+    ) {
+      return "Antigravity rejected an invalid function-call message boundary. Next: update the extension or start a new session, then retry; re-login is not required.";
+    }
     if (/API key not valid|API_KEY_INVALID/i.test(msg)) {
       return "Antigravity login expired or credentials are invalid. Next: run /login antigravity, then retry.";
     }
@@ -895,10 +934,20 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     if (/Individual quota reached/i.test(msg)) {
       return `Quota reached. Please wait ${wait || "for reset"}. Next: switch models or try again after reset.`;
     }
-    if (/quota/i.test(msg)) {
+    // Google answers a real quota wall with a "Resets in …" hint, but uses generic
+    // RESOURCE_EXHAUSTED ("Resource has been exhausted (e.g. check quota).") for
+    // transient throttling and capacity pressure. Classifying on the word "quota"
+    // alone wrongly marked transient throttling as a hard quota wall, disabling
+    // Pi's automatic retry backoff. Keep real quota walls non-retryable, and
+    // format transient throttling so Pi's retry mechanism engages.
+    const hardLimit =
+      Boolean(wait) ||
+      (!/rate.?limit/i.test(msg) &&
+        /quota exceeded|exceeded your|limit reached|reached your|daily limit/i.test(msg));
+    if (hardLimit) {
       return `Quota reached.${wait ? ` Please wait ${wait}.` : ""} Next: switch models or retry later.`;
     }
-    return `Rate limited by Antigravity. Next: wait a bit and retry.${wait ? ` Reset: ${wait}.` : ""}`;
+    return "Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.";
   }
   if (status === 500) {
     return "Antigravity had an internal server error. Next: retry in a moment or switch models.";
@@ -1344,7 +1393,15 @@ export function streamAntigravity(
             setLastStatus(response.status);
             if (response.ok) break;
             lastText = await response.text();
-            if (response.status === 429 && /Individual quota reached/i.test(lastText)) break;
+            if (
+              response.status === 429 &&
+              (/Individual quota reached/i.test(lastText) ||
+                /Resets? in /i.test(lastText) ||
+                (!/rate.?limit/i.test(lastText) &&
+                  /quota exceeded|exceeded your|daily limit/i.test(lastText)))
+            ) {
+              break;
+            }
             if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
           }
 
