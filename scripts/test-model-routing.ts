@@ -1,3 +1,4 @@
+import { inspect, isDeepStrictEqual } from "node:util";
 import {
   isRetryableAssistantError,
   type Api,
@@ -43,8 +44,8 @@ const assert = {
     if (actual === expected) fail(`expected values not to be equal: ${String(actual)}`);
   },
   deepEqual(actual: unknown, expected: unknown, message?: string) {
-    if (!Bun.deepEquals(actual, expected)) {
-      fail(message ?? `expected ${Bun.inspect(expected)}, got ${Bun.inspect(actual)}`);
+    if (!isDeepStrictEqual(actual, expected)) {
+      fail(message ?? `expected ${inspect(expected)}, got ${inspect(actual)}`);
     }
   },
   ok(value: unknown, message?: string) {

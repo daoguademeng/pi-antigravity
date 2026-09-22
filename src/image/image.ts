@@ -42,15 +42,15 @@ export type ImageGenerateRequest = {
   project: string;
   model: string;
   request: {
-    contents: Array<{ role: GeminiRole.User; parts: Array<{ text: string }> }>;
-    systemInstruction: { role: GeminiRole.User; parts: Array<{ text: string }> };
+    contents: Array<{ role: "user"; parts: Array<{ text: string }> }>;
+    systemInstruction: { role: "user"; parts: Array<{ text: string }> };
     generationConfig: {
       imageConfig: { aspectRatio: string };
       candidateCount: number;
     };
   };
-  requestType: AntigravityRequestType.Agent;
-  userAgent: AntigravityUserAgent.Antigravity;
+  requestType: "agent";
+  userAgent: "antigravity";
   requestId: string;
 };
 

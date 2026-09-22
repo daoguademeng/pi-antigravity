@@ -16,6 +16,9 @@ env:
   UPSTREAM_REPOSITORY: Rahularya01/pi-antigravity
   UPSTREAM_BRANCH: main
   TARGET_BRANCH: main
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: 0
+  YARN_ENABLE_HARDENED_MODE: "1"
+  YARN_ENABLE_SCRIPTS: "false"
 
 jobs:
   validate:
@@ -56,25 +59,27 @@ jobs:
           git merge --no-edit "${upstream_sha}"
           echo "changed=true" >> "${GITHUB_OUTPUT}"
 
-      - name: Setup Bun
+      - name: Setup Node
         if: steps.candidate.outputs.changed == 'true'
-        shell: bash
-        run: |
-          bun_version="$(tr -d '[:space:]' < .bun-version)"
-          curl -fsSL https://bun.sh/install | bash -s "bun-v${bun_version}"
-          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable Corepack
+        if: steps.candidate.outputs.changed == 'true'
+        run: corepack enable
 
       - name: Install dependencies
         if: steps.candidate.outputs.changed == 'true'
-        run: bun install --frozen-lockfile --ignore-scripts
+        run: yarn install --immutable
 
       - name: Verify fork invariants
         if: steps.candidate.outputs.changed == 'true'
-        run: bun scripts/check-fork-invariants.ts
+        run: node scripts/run-ts.mjs scripts/check-fork-invariants.ts
 
       - name: Run upstream checks
         if: steps.candidate.outputs.changed == 'true'
-        run: bun run check
+        run: yarn check
 
   sync:
     name: Push validated merge
