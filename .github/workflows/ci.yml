@@ -30,4 +30,5 @@ jobs:
           node-version-file: .nvmrc
       - run: corepack enable
       - run: yarn install --immutable
+      - run: node scripts/run-ts.mjs scripts/check-fork-invariants.ts
       - run: yarn check

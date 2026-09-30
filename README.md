@@ -45,6 +45,8 @@ Or install the latest repository version:
 pi install git:github.com/Rahularya01/pi-antigravity
 ```
 
+On Oh My Pi, install the same package with `omp plugin install npm:pi-antigravity`.
+
 Restart Pi (or run `/reload`) after installation. To update the npm package later, use `pi update npm:pi-antigravity`.
 
 ## Quick start
@@ -108,10 +110,13 @@ Review these permissions before approving access. If your credentials expire or 
 | `/antigravity.refresh` | Force refresh the dynamic model catalog from Antigravity. |
 | `/antigravity.doctor` | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
 | `/antigravity.image <prompt>` | Generate an image via Antigravity and save it under `.pi/generated-images/`. Optional `--ratio 16:9`, `--model`, `--path`. |
+| `/antigravity.search <query>` | Search the web using Google Search Grounding via Antigravity. Optional `--thinking`, `--url <url>`. |
 
 Model availability, entitlement, quota groups, and resets are returned by the service and can differ by account. The quota percentage shown for a model can represent a shared pool, not a private per-model allowance.
 
-The extension also registers a `generate_image` tool the model can call. Images are written inside the project directory (default `.pi/generated-images/`). Image models such as `gemini-3-pro-image` are account-dependent; `/antigravity.image` falls back to other advertised Gemini image IDs on 404.
+This fork intentionally registers no model-callable tools: neither `generate_image` nor `google_search`. This keeps tool ownership with other extensions (including pi-codex for `generate_image`) while preserving the Antigravity provider, OAuth, and explicit namespaced commands.
+
+Use `/antigravity.image` to generate images inside the project directory (default `.pi/generated-images/`). Image models such as `gemini-3-pro-image` are account-dependent; the command falls back to other advertised Gemini image IDs on 404. Use `/antigravity.search` for Google Search Grounding via Cloud Code Assist, with optional `--url` and `--thinking` flags.
 
 ## Models and routing
 
@@ -187,6 +192,7 @@ Provider requests reuse a keep-alive connection pool when the runtime supports i
 - **Claude/GPT tool-call schema error:** Upgrade to the latest package release. The provider adapts Pi's JSON Schema tool definitions for the Cloud Code Assist custom-tool bridge.
 - **Quota or rate limit:** Run `/antigravity.usage`. A `429` response usually indicates quota or rate limiting; changing models may still draw from the same shared pool.
 - **Need a safe diagnostic:** `/antigravity.doctor` redacts recognized secrets from its error output. Still review output before sharing it publicly.
+- **Oh My Pi says `registerApiProvider` is not exported:** Upgrade to 0.8.1 or later. Older builds statically import a Pi compat export that Oh My Pi's bundled runtime does not provide. The provider still registers through `pi.registerProvider` on that host.
 
 ## Development
 

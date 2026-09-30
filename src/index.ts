@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { registerApiProvider } from "@earendil-works/pi-ai/compat";
+// Namespace import: Oh My Pi rewrites this specifier onto bundled pi-ai, which
+// does not export registerApiProvider. A static named import fails plugin load.
+import * as piAiCompat from "@earendil-works/pi-ai/compat";
 import {
   activateAccount,
   getApiKey,
@@ -13,6 +15,7 @@ import {
 import { DEFAULT_ENDPOINT } from "./client/index.js";
 import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";
 import { generateAntigravityImage, parseImageCommandArgs } from "./image/index.js";
+import { executeAntigravitySearch, parseSearchCommandArgs } from "./search/index.js";
 import {
   applyAntigravityCatalog,
   discoverAntigravityModels,
@@ -87,12 +90,29 @@ async function withUsage(
   }
 }
 
-export default function (pi: ExtensionAPI): void {
-  registerApiProvider({
+type CompatApiProviderRegistrar = (provider: {
+  api: typeof ANTIGRAVITY_API;
+  stream: typeof streamAntigravity;
+  streamSimple: typeof streamAntigravity;
+}) => void;
+
+/**
+ * Pi dispatches custom APIs through the compat registry. Oh My Pi does not
+ * export `registerApiProvider` and registers the stream inside `registerProvider`.
+ */
+function registerCompatApiProvider(): void {
+  const register = (piAiCompat as { registerApiProvider?: CompatApiProviderRegistrar })
+    .registerApiProvider;
+  if (typeof register !== "function") return;
+  register({
     api: ANTIGRAVITY_API,
     stream: streamAntigravity,
     streamSimple: streamAntigravity,
   });
+}
+
+export default function (pi: ExtensionAPI): void {
+  registerCompatApiProvider();
 
   const initialCatalog = getCurrentAntigravityCatalog();
 
@@ -243,7 +263,7 @@ export default function (pi: ExtensionAPI): void {
         `lastError=${d.error ? redactSecrets(d.error) : "none"}`,
         "transport=native-streamSimple",
         "runtimeCli=not-used",
-        "commands=/antigravity.usage /antigravity.models /antigravity.accounts /antigravity.refresh /antigravity.doctor /antigravity.image",
+        "commands=/antigravity.usage /antigravity.models /antigravity.accounts /antigravity.refresh /antigravity.doctor /antigravity.image /antigravity.search",
       ];
       emitCommandOutput(ctx, `Antigravity doctor\n${lines.join("\n")}`);
     },
@@ -289,7 +309,44 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
-  // This fork intentionally does not register a model-callable image tool:
-  // pi-codex already owns `generate_image` in Maple's setup. The explicit,
-  // namespaced `/antigravity.image` command above remains available.
+  pi.registerCommand("antigravity.search", {
+    description:
+      "Search the web via Antigravity Grounding (usage: /antigravity.search [--thinking] [--url <url>] <query>)",
+    handler: async (args, ctx) => {
+      const parsed = parseSearchCommandArgs(args || "");
+      if (!parsed.query) {
+        emitCommandOutput(
+          ctx,
+          "Usage: /antigravity.search [--thinking] [--url <url>] <query>",
+          "warning",
+        );
+        return;
+      }
+      try {
+        const apiKey = await resolveApiKeyFromContext(ctx);
+        if (!apiKey) {
+          emitCommandOutput(
+            ctx,
+            "No Antigravity credentials. Run /login antigravity first.",
+            "warning",
+          );
+          return;
+        }
+        if (ctx.hasUI) ctx.ui.notify("Searching Google via Antigravity Grounding…", "info");
+        const result = await executeAntigravitySearch({
+          apiKey,
+          query: parsed.query,
+          urls: parsed.urls,
+          thinking: parsed.thinking,
+        });
+        emitCommandOutput(ctx, result);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        emitCommandOutput(ctx, `Antigravity search failed: ${redactSecrets(msg)}`, "warning");
+      }
+    },
+  });
+
+  // This fork intentionally registers no model-callable tools, including
+  // `generate_image` and `google_search`. Keep the namespaced commands above.
 }
