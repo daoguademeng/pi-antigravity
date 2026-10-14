@@ -80,6 +80,7 @@ The provider uses the OAuth 2.0 Authorization Code flow with PKCE, so credential
 2. After you approve access, Pi exchanges the callback code for tokens and stores the provider credentials in Pi's auth store (normally `~/.pi/agent/auth.json`).
 3. Pi refreshes access tokens automatically when they expire — you shouldn't need to sign in again unless a token is revoked.
 4. Successful logins and token rotations are also kept in `~/.pi/agent/antigravity-accounts.json` with owner-only permissions so linked accounts can be switched without re-authenticating.
+5. Access is quota-backed by the signed-in Google account rather than billed per token, so Pi marks Antigravity models as subscription-backed (`(sub)` in the footer); any cost Pi shows for them is a catalog estimate.
 
 The callback listener binds only to a loopback host, so it isn't reachable from outside your machine. The auth and account files it writes to contain sensitive access and refresh tokens: **do not commit them, paste them into issues, or share their contents.**
 
@@ -114,9 +115,24 @@ Review these permissions before approving access. If your credentials expire or 
 
 Model availability, entitlement, quota groups, and resets are returned by the service and can differ by account. The quota percentage shown for a model can represent a shared pool, not a private per-model allowance.
 
-This fork intentionally registers no model-callable tools: neither `generate_image` nor `google_search`. This keeps tool ownership with other extensions (including pi-codex for `generate_image`) while preserving the Antigravity provider, OAuth, and explicit namespaced commands.
+This fork intentionally registers no model-callable tools: neither `generate_image` nor `google_search`. Only `src/index.ts` is loaded through the package manifest; the upstream feature extensions are retained for maintenance and tests but are not enabled. This keeps tool ownership with other extensions, including pi-codex for `generate_image`.
 
-Use `/antigravity.image` to generate images inside the project directory (default `.pi/generated-images/`). Image models such as `gemini-3-pro-image` are account-dependent; the command falls back to other advertised Gemini image IDs on 404. Use `/antigravity.search` for Google Search Grounding via Cloud Code Assist, with optional `--url` and `--thinking` flags.
+Use `/antigravity.image` for explicit image generation (default model: `gemini-3.1-flash-image`) and `/antigravity.search` for Google Search Grounding (default model: `gemini-3.5-flash-lite`, with `--url` and `--thinking` options). The native image provider API below is also retained; it does not register a model-callable tool.
+
+### Native image API
+
+On Pi versions that support mixed-operation provider registration (`type: "image"` and `images` handlers), Antigravity exposes `gemini-3.1-flash-image` to codemode and `ctx.modelRegistry.generateImages()`. Older Pi versions can continue using the existing image command; the native API is not available there.
+
+```js
+const model = await models.getModelOfType("image", "antigravity", "gemini-3.1-flash-image");
+const result = await models.generateImages(model, {
+  input: [{ type: "text", text: "A red square on white" }],
+});
+if (result.stopReason !== "stop") return result.errorMessage;
+for (const block of result.output) if (block.type === "image") image(block);
+```
+
+The native API returns in-memory image/text blocks and does not save files. Input image blocks are accepted without local path loading. Extensions can pass `metadata: { aspectRatio: "16:9" }` through image options. Credentials are resolved by Pi. Backend usage is not currently reported by this adapter.
 
 ## Models and routing
 
@@ -174,6 +190,13 @@ All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_`
 | `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history. |
 | `ANTIGRAVITY_NO_KEEPALIVE` | Set to `1` to skip the keep-alive connection pool. |
 | `ANTIGRAVITY_NO_PREWARM` | Set to `1` to skip the TLS pre-warm request made on the first Antigravity request. |
+| `ANTIGRAVITY_NO_EXTRA_TOOLS` | Set to `1` to stop registering the model-facing `google_search` and `generate_image` tools. The `/antigravity.search` and `/antigravity.image` commands stay available. |
+| `ANTIGRAVITY_NO_SEARCH_TOOL` | Set to `1` to skip only the `google_search` tool, e.g. when another extension provides web search. |
+| `ANTIGRAVITY_NO_IMAGE_TOOL` | Set to `1` to skip only the `generate_image` tool. |
+
+`pi config` can disable each model-facing tool without disabling the provider. The package loads three extension resources: `src/index.ts` (provider, OAuth, and slash commands), `src/features/google-search.ts` (`google_search`), and `src/features/generate-image.ts` (`generate_image`). Turn off a feature resource there to stop registering that tool. `/antigravity.search` and `/antigravity.image` stay available from the provider extension.
+
+Environment variables still force a loaded tool off, including in scripts and headless runs. They cannot turn a resource back on after `pi config` disables it, because that file is not loaded. Either control is enough to hide the tool from the model. Run `/reload` after changing `pi config` or the environment in an active session; a new Pi process also picks the change up. A restart is not required when `/reload` succeeds.
 
 By default, the provider tries `https://daily-cloudcode-pa.googleapis.com`, then the sandbox host, then `https://cloudcode-pa.googleapis.com`. Prefer the built-in OAuth client unless you have a reason to use your own credentials.
 
@@ -184,6 +207,7 @@ Provider requests reuse a keep-alive connection pool when the runtime supports i
 ## Troubleshooting
 
 - **No credentials / 401 / 403:** Run `/login antigravity` again, then check `/antigravity.doctor`.
+- **403 `VALIDATION_REQUIRED` / "Verify your account":** Open the `accounts.google.com` link in the error, in a browser signed in to the same Google account, and finish verification. Re-login alone does not clear it. `/antigravity.doctor` omits that link because it carries session parameters.
 - **Remote/headless machine — browser can't reach `localhost:51121`:** The callback binds to loopback only, so a browser on another machine can't hit it. You have two options:
   - **Paste (no extra setup):** Run `/login antigravity`, open the shown URL and complete Google sign-in in _any_ browser. When it redirects to `http://localhost:51121/oauth-callback?…` and fails to load, copy that full URL from the address bar and paste it into the prompt Pi shows. The code is single-use and expires quickly, so paste promptly.
   - **SSH tunnel (reusable):** From the machine with the browser, run `ssh -N -L 51121:127.0.0.1:51121 <user>@<server>` and keep it open, then run `/login antigravity` on the server. The redirect to `localhost:51121` tunnels through to the local callback automatically.

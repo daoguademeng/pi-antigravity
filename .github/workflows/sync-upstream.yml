@@ -28,6 +28,7 @@ jobs:
       base_sha: ${{ steps.candidate.outputs.base_sha }}
       changed: ${{ steps.candidate.outputs.changed }}
       upstream_sha: ${{ steps.candidate.outputs.upstream_sha }}
+      tree_sha: ${{ steps.candidate.outputs.tree_sha }}
     steps:
       # v5
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -57,6 +58,7 @@ jobs:
           fi
 
           git merge --no-edit "${upstream_sha}"
+          echo "tree_sha=$(git rev-parse HEAD^{tree})" >> "${GITHUB_OUTPUT}"
           echo "changed=true" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Node
@@ -101,6 +103,7 @@ jobs:
         env:
           VALIDATED_BASE_SHA: ${{ needs.validate.outputs.base_sha }}
           VALIDATED_UPSTREAM_SHA: ${{ needs.validate.outputs.upstream_sha }}
+          VALIDATED_TREE_SHA: ${{ needs.validate.outputs.tree_sha }}
         run: |
           set -euo pipefail
 
@@ -122,8 +125,10 @@ jobs:
 
           git merge --no-edit "${VALIDATED_UPSTREAM_SHA}"
 
-          if grep -R -nE --include='*.ts' "name:[[:space:]]*['\"]generate_image['\"]" src; then
-            echo "generate_image registration reappeared after merge" >&2
+          # Feature source files may contain dormant tools. Verify the complete
+          # tree instead: its manifest and loaded entries passed fork invariants.
+          if [[ "$(git rev-parse HEAD^{tree})" != "${VALIDATED_TREE_SHA}" ]]; then
+            echo "merge tree differs from the validated candidate" >&2
             exit 1
           fi
 

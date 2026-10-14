@@ -4,6 +4,41 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-08
+
+### Added
+
+- **Native image API:** Pi `generateImages` / codemode can call `gemini-3.1-flash-image` without saving files (#82).
+- **Per-feature toggles:** `pi config` can disable `src/features/google-search.ts` or `src/features/generate-image.ts` while keeping the provider and slash commands. Environment variables still force a loaded tool off (#79).
+
+### Changed
+
+- **Google Search default:** Interactive search uses `gemini-3.5-flash-lite` with a compact evidence brief and no default thinking budget. `--thinking` and `--model` still override it. Fallbacks are `gemini-3.1-flash-lite` and `gemini-3-flash` (#80).
+- **Image requests:** Default image model is `gemini-3.1-flash-image`, using the direct image endpoint and `image_gen` request type, with the legacy stream endpoint only on HTTP 404 (#81).
+
+### Fixed
+
+- **Subscription marker:** The OAuth registration now sets `isSubscription`, so Pi classifies Antigravity models as subscription-backed (footer `(sub)` marker) instead of metered (#74).
+- **Search citations:** Inline Google Search citations use UTF-8 byte offsets and keep original source indexes (#78).
+- **Session IDs:** Explicit and fallback session IDs are stable signed-int64 values instead of a new random ID on every omitted-ID request (#76, #77).
+- **Mid-stream errors:** A trailing 500/503 body, or a stream that ends without `finishReason`, is reported as an error instead of a successful stop (#72).
+- **Account verification:** A 403 `VALIDATION_REQUIRED` response includes the `accounts.google.com` verification link. `/antigravity.doctor` still redacts that link (#73).
+
+## [0.9.0] - 2026-09-30
+
+### Added
+
+- **Extra tool toggles:** `ANTIGRAVITY_NO_EXTRA_TOOLS`, `ANTIGRAVITY_NO_SEARCH_TOOL`, and `ANTIGRAVITY_NO_IMAGE_TOOL` stop the `google_search` / `generate_image` tools from being registered so they do not clash with other search providers (#65).
+
+### Changed
+
+- **Dependencies:** Bump undici to 8.11.2 and dev tooling to pi 0.86.1, which clears the high-severity undici advisories (GHSA-rfgv-xxqx-mfg5, GHSA-w293-vg96-wgc3) reported by `yarn audit`.
+
+### Fixed
+
+- **Emoji corruption:** `sanitizeText` now only replaces unpaired surrogates, so valid emoji and other astral characters are no longer turned into U+FFFD (#66, #67, thanks @sobh).
+- **OAuth response decompression:** Use the existing Undici fetch for Google OAuth requests so SDK hosts do not parse raw gzip bytes as JSON with Node 26 built-in fetch (#69, thanks @Nyarlathoteppppp).
+
 ## [0.8.1] - 2026-09-28
 
 ### Added
